@@ -73,6 +73,7 @@ def spawn_clients():
     for _ in range(5):
         yield client
 
+
 def exception():
     yield
     raise ValueError()

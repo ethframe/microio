@@ -10,10 +10,11 @@ __all__ = ('Stream', 'connect', 'listen', 'serve')
 
 class Stream:
 
-    def __init__(self, sock):
+    def __init__(self, sock, read_size=65536):
         sock.setblocking(False)
         self.sock = sock
         self.buffer = b''
+        self.read_size = read_size
 
     def close(self):
         self.sock.close()
@@ -21,7 +22,7 @@ class Stream:
     def read_bytes(self, n):
         while len(self.buffer) < n:
             yield SocketOp.READ, self.sock
-            data = self.sock.recv(1024)
+            data = self.sock.recv(self.read_size)
             if not data:
                 raise IOError('Connection closed')
             self.buffer += data
@@ -29,10 +30,10 @@ class Stream:
         self.buffer = self.buffer[n:]
         raise Return(buffer)
 
-    def read_until(self, pat, n=1024):
+    def read_until(self, pat, n=65536):
         while pat not in self.buffer and len(self.buffer) < n:
             yield SocketOp.READ, self.sock
-            data = self.sock.recv(1024)
+            data = self.sock.recv(self.read_size)
             if not data:
                 raise IOError('Connection closed')
             self.buffer += data
