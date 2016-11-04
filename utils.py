@@ -20,23 +20,35 @@ class Stream:
         self.sock.close()
 
     def read_bytes(self, n):
-        while len(self.buffer) < n:
-            yield SocketOp.READ, self.sock
-            data = self.sock.recv(self.read_size)
-            if not data:
-                raise IOError('Connection closed')
-            self.buffer += data
+        try:
+            while len(self.buffer) < n:
+                err = yield self.sock, POLLREAD | POLLERROR
+                if err & POLLERROR:
+                    raise IOError()
+                data = self.sock.recv(self.read_size)
+                if not data:
+                    raise IOError('Connection closed')
+                self.buffer += data
+            yield self.sock, None
+        except IOError:
+            yield self.sock, None
         buffer = self.buffer[:n]
         self.buffer = self.buffer[n:]
         raise Return(buffer)
 
     def read_until(self, pat, n=65536):
-        while pat not in self.buffer and len(self.buffer) < n:
-            yield SocketOp.READ, self.sock
-            data = self.sock.recv(self.read_size)
-            if not data:
-                raise IOError('Connection closed')
-            self.buffer += data
+        try:
+            while pat not in self.buffer and len(self.buffer) < n:
+                err = yield self.sock, POLLREAD | POLLERROR
+                if err & POLLERROR:
+                    raise IOError()
+                data = self.sock.recv(self.read_size)
+                if not data:
+                    raise IOError('Connection closed')
+                self.buffer += data
+            yield self.sock, None
+        except IOError:
+            yield self.sock, None
         if pat not in self.buffer:
             raise IOError('Buffer limit exceeded')
         n = self.buffer.find(pat) + len(pat)
@@ -45,12 +57,18 @@ class Stream:
         raise Return(buffer)
 
     def write(self, data):
-        while data:
-            yield SocketOp.WRITE, self.sock
-            sent = self.sock.send(data)
-            if not sent:
-                raise IOError('Connection closed')
-            data = data[sent:]
+        try:
+            while data:
+                err = yield self.sock, POLLWRITE | POLLERROR
+                if err & POLLERROR:
+                    raise IOError()
+                sent = self.sock.send(data)
+                if not sent:
+                    raise IOError('Connection closed')
+                data = data[sent:]
+            yield self.sock, None
+        except IOError:
+            yield self.sock, None
 
 
 def connect(address):
@@ -59,7 +77,10 @@ def connect(address):
     sock.setblocking(False)
     ret = sock.connect_ex(address)
     if ret in (errno.EWOULDBLOCK, errno.EINPROGRESS, errno.EAGAIN):
-        yield SocketOp.WRITE, sock
+        err = yield sock, POLLWRITE | POLLERROR
+        yield sock, None
+        if err & POLLERROR:
+            raise IOError()
         ret = sock.connect_ex(address)
     if ret != errno.EISCONN:
         raise IOError()
@@ -78,8 +99,14 @@ def listen(address):
 
 
 def serve(sock, handler):
-    while True:
-        yield SocketOp.READ, sock
-        csock, addr = sock.accept()
-        stream = Stream(csock)
-        yield handler(stream, addr)
+    try:
+        while True:
+            err = yield sock, POLLREAD | POLLERROR
+            if err & POLLERROR:
+                raise IOError()
+            csock, addr = sock.accept()
+            stream = Stream(csock)
+            yield handler(stream, addr)
+        yield sock, None
+    except IOError:
+        yield sock, None

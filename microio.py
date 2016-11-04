@@ -2,14 +2,14 @@
 `microio` - dumb event loop based on `select.select`
 """
 
-from collections import deque
+from collections import deque, defaultdict
 import heapq
 import inspect
 import select
 import socket
 import time
 
-__all__ = ('loop', 'Return', 'SocketOp')
+__all__ = ('loop', 'Return', 'POLLREAD', 'POLLWRITE', 'POLLERROR')
 
 
 class Return(BaseException):
@@ -18,14 +18,66 @@ class Return(BaseException):
         self.value = value
 
 
-class SocketOp:
-    READ = 0
-    WRITE = 1
+if hasattr(select, 'epoll'):
+    POLLREAD = select.EPOLLIN
+    POLLWRITE = select.EPOLLOUT
+    POLLERROR = select.EPOLLERR | select.EPOLLHUP
+    Poll = select.epoll
+elif hasattr(select, 'poll'):
+    POLLREAD = select.POLLIN
+    POLLWRITE = select.POLLOUT
+    POLLERROR = select.POLLERR | select.POLLHUP
+    Poll = select.poll
+else:
+    POLLREAD = 0x01
+    POLLWRITE = 0x02
+    POLLERROR = 0x04
+
+    class Poll:
+
+        def __init__(self):
+            self.readers = set()
+            self.writers = set()
+            self.errors = set()
+
+        def register(self, fd, mask):
+            if mask & POLLREAD:
+                self.readers.add(fd)
+            if mask & POLLWRITE:
+                self.writers.add(fd)
+            if mask & POLLERROR:
+                self.errors.add(fd)
+
+        def modify(self, fd, mask):
+            self.unregister(fd)
+            self.register(fd, mask)
+
+        def unregister(self, fd):
+            self.readers.discard(fd)
+            self.writers.discard(fd)
+            self.errors.discard(fd)
+
+        def poll(self, timeout=-1):
+            if not any((self.readers, self.writers, self.errors)):
+                time.sleep(max(0.0, timeout))
+                return []
+            if timeout < 0.0:
+                timeout = None
+            r, w, x = select.select(self.readers, self.writers,
+                                    self.errors, timeout)
+            events = defaultdict(lambda: 0)
+            for fd in r:
+                events[fd] |= POLLREAD
+            for fd in w:
+                events[fd] |= POLLWRITE
+            for fd in x:
+                events[fd] |= POLLERROR
+            return list(events.items())
 
 
 def loop(task):
-    readers = set()
-    writers = set()
+    poll = Poll()
+    sockets = {}
     timeouts = []
     waiters = {}
     exceptions = {}
@@ -34,7 +86,7 @@ def loop(task):
     root = task
     root_ret = None
 
-    while any((tasks, timeouts, readers, writers)):
+    while any((tasks, timeouts, sockets)):
         if tasks:
             current, val = tasks.popleft()
             try:
@@ -51,18 +103,25 @@ def loop(task):
                     tasks.append((current, None))
                 elif isinstance(yielded, tuple):  # Requst to wait for IO event
                     try:
-                        op, sock = yielded
+                        sock, mask = yielded
                     except ValueError:
                         raise RuntimeError(current)
                     if not isinstance(sock, socket.socket):
                         raise RuntimeError(current)
-                    if op == SocketOp.READ:
-                        readers.add(sock)
-                    elif op == SocketOp.WRITE:
-                        writers.add(sock)
+                    fd = sock.fileno()
+                    if mask is None:
+                        old = sockets.pop(fd, None)
+                        if old is not None:
+                            poll.unregister(fd)
+                        tasks.append((current, None))
                     else:
-                        raise RuntimeError(current)
-                    waiters[sock] = current
+                        _, old = sockets.get(fd, (None, None))
+                        sockets[fd] = (sock, mask)
+                        if old is None:
+                            poll.register(fd, mask)
+                        else:
+                            poll.modify(fd, mask)
+                        waiters[fd] = current
                 # Request to wait for timeout
                 elif isinstance(yielded, (float, int)):
                     heapq.heappush(timeouts, (yielded, id(current), current))
@@ -86,26 +145,19 @@ def loop(task):
                 else:  # Reraise if current task is on top level
                     raise
 
-        if readers or writers:
-            timeout = None
-            if tasks:  # If there is active tasks, do quick check on events
-                timeout = 0.0
-            elif timeouts:
-                # If there is pending timeout, wait for events up to it
-                timeout = max(0.0, timeouts[0][0] - time.time())
-            r, w, _ = select.select(readers, writers, [], timeout)
-            readers.difference_update(r)
-            writers.difference_update(w)
-            for sock in set(r + w):  # Reschedule tasks
-                waiter = waiters.pop(sock, None)
-                if waiter:
-                    tasks.append((waiter, None))
+        timeout = -1
+        if tasks:  # If there is active tasks, do quick check on events
+            timeout = 0.0
+        elif timeouts:
+            # If there is pending timeout, wait for events up to it
+            timeout = max(0.0, timeouts[0][0] - time.time())
+        for fd, mask in poll.poll(timeout):
+            waiter = waiters.pop(fd, None)
+            if waiter:
+                tasks.append((waiter, mask))
 
         if timeouts:
             timeout, _, waiter = timeouts[0]  # Handle earliest timeout
-            if not (tasks or readers or writers):
-                # If there is no other tasks, loop can sleep until next timeout
-                time.sleep(max(0.0, timeout - time.time()))
             if time.time() >= timeout:
                 heapq.heappop(timeouts)
                 tasks.append((waiter, None))

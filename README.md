@@ -1,1 +1,1 @@
-`microio` - dumb event loop based on `select.select`.
+`microio` - dumb event loop. Uses `epoll` or `poll` when available, and `select` as fallback.

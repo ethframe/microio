@@ -8,14 +8,16 @@ import random
 from microio import *
 
 
+
 def connect(address):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setblocking(False)
     ret = sock.connect_ex(address)
     if ret in (errno.EWOULDBLOCK, errno.EINPROGRESS, errno.EAGAIN):
-        yield SocketOp.WRITE, sock
+        yield sock, POLLWRITE
         ret = sock.connect_ex(address)
+        yield sock, None
     if ret != errno.EISCONN:
         raise IOError()
     if ret == errno.ECONNREFUSED:
@@ -26,12 +28,13 @@ def connect(address):
 def server_handler(sock):
     def handler():
         while True:
-            yield SocketOp.READ, sock
+            yield sock, POLLREAD
             data = sock.recv(1024)
             if not data:
                 break
-            yield SocketOp.WRITE, sock
+            yield sock, POLLWRITE
             sock.send(data)
+        yield sock, None
         sock.close()
     return handler
 
@@ -44,10 +47,11 @@ def server():
     sock.listen(1)
     print('Listening')
     for _ in range(5):
-        yield SocketOp.READ, sock
+        yield sock, POLLREAD
         csock, addr = sock.accept()
         print('Connection from {}'.format(addr))
         yield server_handler(csock)
+    yield sock, None
 
 
 def client():
@@ -58,13 +62,14 @@ def client():
     sock.send(msg)
     recvd = b''
     while True:
-        yield SocketOp.READ, sock
+        yield sock, POLLREAD
         data = sock.recv(1024)
         if not data:
             break
         recvd += data
         if recvd == msg:
             break
+    yield sock, None
     sock.close()
     print(recvd)
 
