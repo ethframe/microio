@@ -18,7 +18,7 @@ def connect(address):
         yield sock, POLLWRITE
         ret = sock.connect_ex(address)
         yield sock, None
-    if ret != errno.EISCONN:
+    if ret not in (0, errno.EISCONN):
         raise IOError()
     if ret == errno.ECONNREFUSED:
         raise IOError()

@@ -146,7 +146,8 @@ def loop(task):
                     raise
 
         timeout = -1
-        if tasks:  # If there is active tasks, do quick check on events
+        if tasks or not sockets:
+            # If there is active tasks or no sockets, do quick check on events
             timeout = 0.0
         elif timeouts:
             # If there is pending timeout, wait for events up to it
