@@ -1,15 +1,27 @@
 """
-`microio` - dumb event loop based on `select.select`
+`microio` - dumb event loop
 """
 
 from collections import deque, defaultdict
 import heapq
 import inspect
+import logging
 import select
 import socket
+import sys
 import time
+import traceback
 
 __all__ = ('loop', 'Return', 'POLLREAD', 'POLLWRITE', 'POLLERROR')
+
+
+exc_logger = logging.getLogger(__name__)
+exc_logger.setLevel(logging.WARN)
+ch = logging.StreamHandler()
+ch.setLevel(logging.WARN)
+formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
+ch.setFormatter(formatter)
+exc_logger.addHandler(ch)
 
 
 class Return(BaseException):
@@ -75,7 +87,7 @@ else:
             return list(events.items())
 
 
-def loop(task):
+def loop(task, hide_loop_tb=False, quiet_exc=False):
     poll = Poll()
     sockets = {}
     timeouts = []
@@ -92,7 +104,7 @@ def loop(task):
             try:
                 e = exceptions.pop(current, None)
                 if e:  # There was an exception in subroutine
-                    yielded = current.throw(e)
+                    yielded = current.throw(*e)
                 else:
                     yielded = current.send(val)
                 if inspect.isgenerator(yielded):  # Subroutine call
@@ -137,13 +149,20 @@ def loop(task):
                     tasks.append((waiter, getattr(e, 'value', None)))
                 elif current == root:
                     root_ret = getattr(e, 'value', None)
-            except Exception as e:  # Other exceptions are passed to callers
+            except Exception:  # Other exceptions are passed to callers
                 waiter = waiters.pop(current, None)
                 if waiter:
-                    exceptions[waiter] = e
+                    exc_type, exc_value, exc_traceback = sys.exc_info()
+                    if hide_loop_tb:
+                        exc_traceback = exc_traceback.tb_next
+                    exceptions[waiter] = (exc_type, exc_value, exc_traceback)
                     tasks.append((waiter, None))
-                else:  # Reraise if current task is on top level
+                elif not quiet_exc:  # Reraise if current task is on top level
                     raise
+                else:
+                    exc_logger.warn('Exception in {}:\n{}'
+                                    .format(current.__name__,
+                                            traceback.format_exc()))
 
         timeout = -1
         if tasks or not sockets:
