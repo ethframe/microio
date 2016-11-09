@@ -157,13 +157,7 @@ import traceback
 __all__ = ("loop", "Return", "POLLREAD", "POLLWRITE", "POLLERROR")
 
 
-exc_logger = logging.getLogger(__name__)
-exc_logger.setLevel(logging.WARN)
-ch = logging.StreamHandler()
-ch.setLevel(logging.WARN)
-formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
-ch.setFormatter(formatter)
-exc_logger.addHandler(ch)
+exc_logger = logging.getLogger("microio.exc")
 
 
 class Return(BaseException):
@@ -230,74 +224,73 @@ else:
 
 
 def loop(task, hide_loop_tb=False, quiet_exc=False):
-
     poll = Poll()
     sockets = {}
     timeouts = []
-    waiters = {}
     io_waiters = {}
     tasks = deque()
-    tasks.append((task, None, None))
+    tasks.append((task, [], None, None))
     root = task
     root_ret = None
 
     while any((tasks, timeouts, sockets)):
         if tasks:
-            current, val, exc = tasks.popleft()
+            current, stack, val, exc = tasks.popleft()
             try:
                 if exc:  # There was an exception in subroutine
                     yielded = current.throw(*exc)
                 else:
                     yielded = current.send(val)
                 if inspect.isgenerator(yielded):  # Subroutine call
-                    tasks.append((yielded, None, None))
-                    waiters[yielded] = current
+                    stack.append(current)
+                    tasks.append((yielded, stack, None, None))
                 elif inspect.isgeneratorfunction(yielded):  # New task
-                    tasks.append((yielded(), None, None))
-                    tasks.append((current, None, None))
+                    tasks.append((yielded(), [], None, None))
+                    tasks.append((current, stack, None, None))
                 elif isinstance(yielded, tuple):  # Requst to wait for IO event
                     try:
                         sock, mask = yielded
                     except ValueError:
                         raise RuntimeError(current)
-                    if not isinstance(sock, socket.socket):
+                    if not hasattr(sock, 'fileno'):
                         raise RuntimeError(current)
                     fd = sock.fileno()
                     if mask is None:
                         old = sockets.pop(fd, None)
                         if old is not None:
                             poll.unregister(fd)
-                        tasks.append((current, None, None))
+                        tasks.append((current, stack, None, None))
                     else:
-                        _, old = sockets.get(fd, (None, None))
-                        sockets[fd] = (sock, mask)
+                        old = sockets.get(fd, None)
+                        sockets[fd] = mask
                         if old is None:
                             poll.register(fd, mask)
                         else:
                             poll.modify(fd, mask)
-                        io_waiters[fd] = current
+                        io_waiters[fd] = (current, stack)
                 # Request to wait for timeout
                 elif isinstance(yielded, (float, int)):
-                    heapq.heappush(timeouts, (yielded, id(current), current))
+                    heapq.heappush(timeouts, (yielded, id(current),
+                                              current, stack))
                 elif yielded is None:  # Can be used for task rescheduling
-                    tasks.append((current, None, None))
+                    tasks.append((current, stack, None, None))
                 else:
                     raise RuntimeError(current)
             except (StopIteration, Return) as e:
                 # Value can be returned using `raise Return(value)` in py2
                 # or with `return value` in py3
-                waiter = waiters.pop(current, None)
-                if waiter:
-                    tasks.append((waiter, getattr(e, "value", None), None))
+                if stack:
+                    tasks.append((stack.pop(), stack,
+                                  getattr(e, "value", None), None))
                 elif current == root:
                     root_ret = getattr(e, "value", None)
             except Exception:  # Other exceptions are passed to callers
-                waiter = waiters.pop(current, None)
-                if waiter:
+                if stack:
                     exc_type, exc_val, exc_tb = sys.exc_info()
                     if hide_loop_tb:
                         exc_tb = exc_tb.tb_next
-                    tasks.append((waiter, None, (exc_type, exc_val, exc_tb)))
+                    tasks.append((stack.pop(), stack,
+                                  None, (exc_type, exc_val, exc_tb)))
                 elif not quiet_exc:  # Reraise if current task is on top level
                     raise
                 else:
@@ -315,13 +308,13 @@ def loop(task, hide_loop_tb=False, quiet_exc=False):
         for fd, mask in poll.poll(timeout):
             waiter = io_waiters.pop(fd, None)
             if waiter:
-                tasks.append((waiter, mask, None))
+                tasks.append((waiter[0], waiter[1], mask, None))
 
         if timeouts:
-            timeout, _, waiter = timeouts[0]  # Handle earliest timeout
+            timeout, _, waiter, stack = timeouts[0]  # Handle earliest timeout
             if time.time() >= timeout:
                 heapq.heappop(timeouts)
-                tasks.append((waiter, None, None))
+                tasks.append((waiter, stack, None, None))
 
     return root_ret
 
