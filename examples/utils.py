@@ -5,7 +5,7 @@ import time
 from microio import *
 
 
-__all__ = ('Stream', 'connect', 'listen', 'serve')
+__all__ = ('Stream', 'connect', 'listen', 'serve', 'spawn')
 
 
 class Stream:
@@ -19,7 +19,7 @@ class Stream:
     def close(self):
         self.sock.close()
 
-    def read_bytes(self, n):
+    def read_bytes(self, n, partial=False):
         try:
             while len(self.buffer) < n:
                 err = yield self.sock, POLLREAD | POLLERROR
@@ -29,6 +29,8 @@ class Stream:
                 if not data:
                     raise IOError('Connection closed')
                 self.buffer += data
+                if partial:
+                    break
             yield self.sock, None
         except IOError:
             yield self.sock, None
@@ -106,7 +108,13 @@ def serve(sock, handler):
                 raise IOError()
             csock, addr = sock.accept()
             stream = Stream(csock)
-            yield handler(stream, addr)
-        yield sock, None
+            yield spawn(handler(stream, addr))
     except IOError:
         yield sock, None
+
+
+def spawn(task):
+    def _spawn_genfunc():
+        yield task
+
+    return _spawn_genfunc
